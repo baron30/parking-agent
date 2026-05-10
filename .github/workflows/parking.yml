@@ -7,10 +7,13 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:   # 允許手動觸發
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 消除 Node.js 20 deprecation 警告
+
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8   # 5 輪 × ~60s + 啟動時間，設 8 分鐘保險
+    timeout-minutes: 10   # install ~2min + 5輪×~65s = ~7.5min，留緩衝
 
     steps:
       - name: Checkout code
@@ -21,16 +24,29 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache pip
+      - name: Cache pip packages
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-playwright
+          key: pip-playwright-requests
 
-      - name: Install dependencies
-        run: |
-          pip install playwright requests
-          playwright install chromium --with-deps
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
+
+      - name: Install Python dependencies
+        run: pip install playwright requests
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Install Playwright system deps only (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
 
       - name: Run parking agent (5 rounds × ~1 min)
         env:
