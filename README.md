@@ -9,103 +9,47 @@
 
 ## 專案架構圖
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        觸發層（免費雲端）                         │
-│                                                                  │
-│   cron-job.org                                                   │
-│   ┌─────────────────────────────┐                               │
-│   │  排程：*/5 * * * *           │                               │
-│   │  時區：Asia/Taipei           │  每 5 分鐘                    │
-│   │  POST /repos/.../dispatches │ ─────────────────────────►   │
-│   │  body: {event_type:trigger} │                               │
-│   └─────────────────────────────┘                               │
-└──────────────────────────────────┬──────────────────────────────┘
-                                   │ repository_dispatch
-                                   ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    GitHub Actions（執行層）                       │
-│                                                                  │
-│   workflow: parking.yml                                          │
-│   ┌──────────────────────────────────────────────────────────┐  │
-│   │  trigger: repository_dispatch / schedule / manual        │  │
-│   │                                                          │  │
-│   │  Job: ubuntu-latest                                      │  │
-│   │  ┌────────────────────────────────────────────────────┐  │  │
-│   │  │  1. Checkout code                                  │  │  │
-│   │  │  2. Setup Python 3.11                              │  │  │
-│   │  │  3. Cache Playwright chromium（加速後續執行）        │  │  │
-│   │  │  4. Install playwright + requests                  │  │  │
-│   │  │  5. Run parking_agent_v2.py                        │  │  │
-│   │  │     CHECK_ROUNDS=5（內部執行 5 輪 × ~60s）          │  │  │
-│   │  └────────────────────────────────────────────────────┘  │  │
-│   └──────────────────────────────────────────────────────────┘  │
-│                                                                  │
-│   GitHub Secrets（加密儲存，程式碼中看不到）                       │
-│   ┌─────────────────────────────────────────────┐               │
-│   │  LINE_CHANNEL_ACCESS_TOKEN                  │               │
-│   │  LINE_USER_ID                               │               │
-│   │  GMAIL_SENDER / GMAIL_PASSWORD              │               │
-│   │  GMAIL_RECIPIENTS                           │               │
-│   │  BOOKER_NAME / BOOKER_PLATE                 │               │
-│   └─────────────────────────────────────────────┘               │
-└──────────────────────────────────┬──────────────────────────────┘
-                                   │ python parking_agent_v2.py
-                                   ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      程式執行層（每輪流程）                        │
-│                                                                  │
-│   每輪 ~60 秒，共 5 輪 → 實質每分鐘偵測一次                        │
-│                                                                  │
-│   ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐ │
-│   │  1. 開啟  │    │  2. 同意 │    │  3. 前往 │    │  4. 找目  │ │
-│   │  瀏覽器   │───►│  條款    │───►│  預約    │───►│  標日期列 │ │
-│   │ (隨機UA) │    │ (勾選)   │    │ (按鈕)   │    │          │ │
-│   └──────────┘    └──────────┘    └──────────┘    └────┬─────┘ │
-│                                                         │       │
-│                              ┌──────────────────────────┤       │
-│                              │                          │       │
-│                         狀態：已滿                  狀態：可預約  │
-│                              │                          │       │
-│                              ▼                          ▼       │
-│                        ❌ 繼續下一輪            ✅ 通知 1 發送   │
-│                                                          │       │
-│                                                          ▼       │
-│                                               自動填入表單        │
-│                                               ┌──────────────┐  │
-│                                               │ 停放天數      │  │
-│                                               │ 姓名         │  │
-│                                               │ 車牌號碼      │  │
-│                                               │ 按「送出」    │  │
-│                                               │ 關閉跳出視窗  │  │
-│                                               └──────┬───────┘  │
-│                                                      │          │
-│                                    ┌─────────────────┴────────┐ │
-│                                    │                          │ │
-│                                預約成功                   預約失敗│
-│                                    │                          │ │
-│                                    ▼                          ▼ │
-│                             ✅ 通知 2 成功              ⚠️ 通知 2 │
-│                                                        請手動確認│
-└──────────────────────────────────┬──────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         通知層                                    │
-│                                                                  │
-│   LINE Messaging API          Gmail SMTP                         │
-│   ┌───────────────────┐      ┌───────────────────────────────┐  │
-│   │  Push Message 給  │      │  寄送給所有 GMAIL_RECIPIENTS   │  │
-│   │  LINE_USER_ID     │      │  (逗號分隔，支援多人)           │  │
-│   └───────────────────┘      └───────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
+```mermaid
+flowchart TD
+    subgraph TRIGGER["⏰ 觸發層（cron-job.org）"]
+        CRON["🕐 排程：*/5 * * * *\n時區：Asia/Taipei\nPOST repository_dispatch\nbody: {event_type: trigger}"]
+    end
 
-### 有效偵測頻率
+    subgraph ACTIONS["⚙️ GitHub Actions（執行層）"]
+        SECRETS["🔒 GitHub Secrets\nLINE_CHANNEL_ACCESS_TOKEN　LINE_USER_ID\nGMAIL_SENDER　GMAIL_PASSWORD　GMAIL_RECIPIENTS\nBOOKER_NAME　BOOKER_PLATE"]
+        subgraph JOB["ubuntu-latest runner"]
+            J1["① Checkout code"] --> J2["② Setup Python 3.11"]
+            J2 --> J3["③ Cache Playwright chromium"]
+            J3 --> J4["④ Install playwright + requests"]
+            J4 --> J5["⑤ Run parking_agent_v2.py\nCHECK_ROUNDS=5"]
+        end
+        SECRETS -. "注入環境變數" .-> JOB
+    end
 
-```
-cron-job.org 每 5 分鐘觸發 × 程式內 5 輪 × 每輪 ~60 秒
-= 實質每 ~1 分鐘偵測一次
+    subgraph PROGRAM["🐍 程式執行層（5 輪 × ~60s = 實質每分鐘偵測）"]
+        P1["🌐 開啟瀏覽器\n隨機 User-Agent\n隨機 viewport"] --> P2["☑️ 勾選同意條款"]
+        P2 --> P3["▶️ 點擊前往預約"]
+        P3 --> P4["🔍 找目標日期列"]
+        P4 --> CHK{"狀態判斷"}
+        CHK -->|"已滿"| RETRY["⏳ 等 ~60s\n進入下一輪"]
+        RETRY --> P1
+        CHK -->|"可預約"| N1["📣 通知 1 發送\n停車位可以預約了！"]
+        N1 --> FORM["📝 自動填入表單\n停放天數 / 姓名 / 車牌號碼\n按送出 → 關閉跳出視窗"]
+        FORM --> RES{"預約結果"}
+        RES -->|"偵測到成功訊息"| OK["✅ 通知 2\n預約成功！"]
+        RES -->|"未偵測到成功"| NG["⚠️ 通知 2\n請手動確認"]
+    end
+
+    subgraph NOTIFY["📬 通知層"]
+        LINE["LINE Messaging API\nPush Message → LINE_USER_ID"]
+        GMAIL["Gmail SMTP\n→ GMAIL_RECIPIENTS\n（逗號分隔，支援多人）"]
+    end
+
+    CRON -->|"每 5 分鐘\nrepository_dispatch"| ACTIONS
+    J5 --> P1
+    N1 --> NOTIFY
+    OK --> NOTIFY
+    NG --> NOTIFY
 ```
 
 ---
