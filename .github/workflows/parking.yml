@@ -56,6 +56,6 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           GMAIL_SENDER: ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-          GMAIL_RECIPIENT: ${{ secrets.GMAIL_RECIPIENT }}
+          GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
           CHECK_ROUNDS: "5"
         run: python parking_book/parking_agent_v2.py

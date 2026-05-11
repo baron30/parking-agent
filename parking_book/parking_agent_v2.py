@@ -36,9 +36,14 @@ ROUNDS = int(os.environ.get("CHECK_ROUNDS", "1"))
 LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID              = os.environ["LINE_USER_ID"]
 
-GMAIL_SENDER    = os.environ["GMAIL_SENDER"]
-GMAIL_PASSWORD  = os.environ["GMAIL_PASSWORD"]
-GMAIL_RECIPIENT = os.environ.get("GMAIL_RECIPIENT", os.environ["GMAIL_SENDER"])
+GMAIL_SENDER     = os.environ["GMAIL_SENDER"]
+GMAIL_PASSWORD   = os.environ["GMAIL_PASSWORD"]
+# 支援多個收件人，以逗號分隔，例如 "a@gmail.com,b@gmail.com"
+GMAIL_RECIPIENTS = [
+    addr.strip()
+    for addr in os.environ.get("GMAIL_RECIPIENTS", os.environ["GMAIL_SENDER"]).split(",")
+    if addr.strip()
+]
 
 # ─────────────────────────────────────────────
 # 反封鎖：隨機 User-Agent 池
@@ -113,11 +118,11 @@ def notify_gmail(subject: str, body: str) -> bool:
         msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
         msg["From"]    = GMAIL_SENDER
-        msg["To"]      = GMAIL_RECIPIENT
+        msg["To"]      = ", ".join(GMAIL_RECIPIENTS)
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
             server.login(GMAIL_SENDER, GMAIL_PASSWORD)
-            server.sendmail(GMAIL_SENDER, GMAIL_RECIPIENT, msg.as_string())
-        log.info("Gmail 通知發送成功")
+            server.sendmail(GMAIL_SENDER, GMAIL_RECIPIENTS, msg.as_string())
+        log.info(f"Gmail 通知發送成功 → {GMAIL_RECIPIENTS}")
         return True
     except Exception as e:
         log.error(f"Gmail 通知例外：{e}")
