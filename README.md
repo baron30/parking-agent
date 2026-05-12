@@ -27,17 +27,21 @@ flowchart TD
     end
 
     subgraph PROGRAM["🐍 程式執行層（5 輪 × ~60s = 實質每分鐘偵測）"]
-        P1["🌐 開啟瀏覽器\n隨機 User-Agent\n隨機 viewport"] --> P2["☑️ 勾選同意條款"]
+        P1["🌐 開啟瀏覽器\n隨機 User-Agent / viewport"] --> GOTO{"頁面導航\n是否成功？"}
+        GOTO -->|"逾時 / 重新導向"| NAVFAIL["⚠️ log warning\n關閉瀏覽器\n不通知"]
+        NAVFAIL --> RETRY["⏳ 等 ~60s\n進入下一輪"]
+        RETRY --> P1
+        GOTO -->|"成功"| P2["☑️ 勾選同意條款"]
         P2 --> P3["▶️ 點擊前往預約"]
         P3 --> P4["🔍 找目標日期列"]
         P4 --> CHK{"狀態判斷"}
-        CHK -->|"已滿"| RETRY["⏳ 等 ~60s\n進入下一輪"]
-        RETRY --> P1
-        CHK -->|"可預約"| N1["📣 通知 1 發送\n停車位可以預約了！"]
-        N1 --> FORM["📝 自動填入表單\n停放天數 / 姓名 / 車牌號碼\n按送出 → 關閉跳出視窗"]
+        CHK -->|"已滿"| RETRY
+        CHK -->|"可預約"| N1["📣 通知 1\n停車位可以預約！\n自動填單進行中..."]
+        N1 --> FORM["📝 填入：停放天數 / 姓名 / 車牌\n按送出 → submitted = True\n關閉跳出視窗"]
         FORM --> RES{"預約結果"}
         RES -->|"偵測到成功訊息"| OK["✅ 通知 2\n預約成功！"]
         RES -->|"未偵測到成功"| NG["⚠️ 通知 2\n請手動確認"]
+        RES -->|"送出後逾時\nsubmitted=True"| POSTTIMEOUT["⚠️ 通知 2\n送出後逾時\n請手動確認"]
     end
 
     subgraph NOTIFY["📬 通知層"]
@@ -50,6 +54,7 @@ flowchart TD
     N1 --> NOTIFY
     OK --> NOTIFY
     NG --> NOTIFY
+    POSTTIMEOUT --> NOTIFY
 ```
 
 ---
@@ -158,6 +163,18 @@ python parking_agent_v2.py
 
 1. Google 帳號 → 安全性 → 應用程式密碼（需先開啟兩步驟驗證）
 2. 新增 → 取得 16 碼密碼 → 填入 `GMAIL_PASSWORD` Secret
+
+---
+
+## 逾時與錯誤處理
+
+| 發生時機 | 行為 | 是否通知 |
+|---------|------|---------|
+| 頁面導航逾時 / 重新導向 | log warning，關閉瀏覽器，下一輪重試 | ❌ 不通知 |
+| 填單過程逾時（送出前） | log warning，下一輪重試 | ❌ 不通知 |
+| 送出後逾時（狀態不明） | log error，停止輪詢 | ✅ 通知（請手動確認） |
+| 預約成功 | log info，停止輪詢 | ✅ 通知成功 |
+| 未偵測到成功訊息 | log warning，停止輪詢 | ✅ 通知（請手動確認） |
 
 ---
 
