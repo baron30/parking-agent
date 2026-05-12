@@ -173,11 +173,16 @@ def notify_booked_failed(reason: str):
 async def check_and_book() -> bool:
     """
     回傳 True 表示已處理完畢（不論成功或失敗），停止後續輪次。
-    回傳 False 表示尚未開放，繼續下一輪。
+    回傳 False 表示尚未開放或導航失敗，繼續下一輪。
     """
     ua       = random.choice(_USER_AGENTS)
     viewport = _random_viewport()
     log.info(f"開始檢查 {TARGET_DATE} | UA: ...{ua[-40:]} | {viewport['width']}x{viewport['height']}")
+
+    # 旗標：是否已按下「送出」
+    # True  → 之後逾時狀態不明，需通知
+    # False → 送出前發生逾時（如重新導向），僅 log，不通知，下一輪重試
+    submitted = False
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -192,13 +197,19 @@ async def check_and_book() -> bool:
         )
         page = await context.new_page()
         try:
-            # ── 進入預約列表 ──
-            await page.goto(
-                "https://pcc.youparking.com.tw/parkingreserve/#/",
-                wait_until="networkidle",
-                timeout=30_000,
-            )
+            # ── 進入預約列表（導航失敗直接關閉瀏覽器重試，不通知）──
+            try:
+                await page.goto(
+                    "https://pcc.youparking.com.tw/parkingreserve/#/",
+                    wait_until="networkidle",
+                    timeout=30_000,
+                )
+            except AsyncPlaywrightTimeoutError:
+                log.warning("導航逾時或被重新導向，關閉瀏覽器，本輪跳過（不通知）")
+                return False
+
             await page.wait_for_timeout(_jitter(1500))
+
             await page.get_by_role("link", name="前往").first.click()
             await page.wait_for_timeout(_jitter(1000))
             await page.locator(".v-input--selection-controls__ripple").click()
@@ -253,8 +264,10 @@ async def check_and_book() -> bool:
             await plate_field.fill(BOOKER_PLATE)
             await page.wait_for_timeout(_jitter(500))
 
-            # ── 點擊「送出」 ──
+            # ── 點擊「送出」（送出後設旗標，之後的逾時才需通知）──
             await page.get_by_role("button", name="送出").click()
+            submitted = True
+            log.info("已點擊送出，等待結果...")
             await page.wait_for_timeout(_jitter(3000))
             try:
                 await page.wait_for_load_state("networkidle", timeout=10_000)
@@ -284,9 +297,15 @@ async def check_and_book() -> bool:
             return True   # 不論成功失敗都停止輪詢
 
         except AsyncPlaywrightTimeoutError as e:
-            log.error(f"頁面操作逾時：{e}")
-            notify_booked_failed(f"頁面逾時：{e}")
-            return True   # 已嘗試，停止輪詢避免重複送出
+            if submitted:
+                # 送出後逾時：狀態不明，需通知
+                log.error(f"送出後頁面逾時，狀態不明：{e}")
+                notify_booked_failed("送出後頁面逾時，請手動確認是否預約成功")
+                return True
+            else:
+                # 送出前逾時（如重新導向）：僅 log，不通知，下一輪重試
+                log.warning(f"送出前頁面逾時（可能被重新導向），關閉瀏覽器重試，本輪跳過（不通知）：{e}")
+                return False
         except Exception as e:
             log.error(f"執行時發生例外：{e}", exc_info=True)
             return False
