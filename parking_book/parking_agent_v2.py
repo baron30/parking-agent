@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import random
+import re
 import smtplib
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -79,6 +80,13 @@ def _jitter(base_ms: int, pct: float = 0.3) -> int:
     delta = int(base_ms * pct)
     return base_ms + random.randint(-delta, delta)
 
+def _mask_email(email: str) -> str:
+    """遮蔽 email 用於 log，格式：k***@gmail.com"""
+    if "@" not in email:
+        return "***"
+    local, domain = email.split("@", 1)
+    return f"{local[0]}***@{domain}"
+
 # ─────────────────────────────────────────────
 # Logger
 # ─────────────────────────────────────────────
@@ -127,7 +135,8 @@ def notify_gmail(subject: str, body: str) -> bool:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
             server.login(GMAIL_SENDER, GMAIL_PASSWORD)
             server.sendmail(GMAIL_SENDER, GMAIL_RECIPIENTS, msg.as_string())
-        log.info(f"Gmail 通知發送成功 → {GMAIL_RECIPIENTS}")
+        masked = [_mask_email(r) for r in GMAIL_RECIPIENTS]
+        log.info(f"Gmail 通知發送成功 → {masked}")
         return True
     except Exception as e:
         log.error(f"Gmail 通知例外：{e}")
@@ -165,6 +174,17 @@ def notify_booked_failed(reason: str):
     )
     notify_line(f"⚠️ 自動預約失敗，請手動操作！\n\n{msg}")
     notify_gmail(subject="⚠️ 停車自動預約失敗，請手動操作！", body=msg)
+
+
+def notify_already_booked_confirmed():
+    """通知：偵測到「已登記預約」提示，查詢記錄確認存在"""
+    msg = (
+        f"【{TARGET_DATE} 已有預約記錄！】\n"
+        f"送出時提示已登記，查詢記錄確認存在。\n"
+        f"確認時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    notify_line(f"✅ 停車預約已確認存在！\n\n{msg}")
+    notify_gmail(subject="✅ 停車預約已確認存在！", body=msg)
 
 # ─────────────────────────────────────────────
 # 預約記錄驗證
@@ -327,7 +347,9 @@ async def check_and_book() -> bool:
             except AsyncPlaywrightTimeoutError:
                 pass
 
-            # ── 關閉送出後跳出的確認/結果視窗 ──
+            # ── 先讀取跳出視窗內容，再關閉 ──
+            page_text = await page.inner_text("body")
+
             try:
                 close_btn = page.get_by_role("button").nth(2)
                 if await close_btn.count() > 0 and await close_btn.is_visible(timeout=3000):
@@ -337,8 +359,8 @@ async def check_and_book() -> bool:
             except Exception:
                 pass  # 視窗不存在或已自動關閉，略過
 
-            # ── 判斷是否成功（精確比對完成訊息，再查詢記錄雙重確認）──
-            page_text = await page.inner_text("body")
+            # ── 判斷結果：三種情況 ──
+            # 情況 A：當次預約完成
             if "您已完成線上預約登記" in page_text:
                 log.info("表單顯示完成，開始查詢記錄雙重確認...")
                 verified = await verify_booking(page)
@@ -348,6 +370,23 @@ async def check_and_book() -> bool:
                 else:
                     log.warning("⚠️ 表單顯示完成，但查詢記錄未找到")
                     notify_booked_failed("預約頁面顯示完成，但查詢記錄未找到，請手動確認")
+
+            # 情況 B：車牌已有舊的登記預約（非當次）
+            elif re.search(
+                rf"車號\s*\[{re.escape(BOOKER_PLATE)}\].*?已於.*?登記預約",
+                page_text,
+                re.DOTALL,
+            ):
+                log.info("偵測到已有登記預約提示，開始查詢記錄確認...")
+                verified = await verify_booking(page)
+                if verified:
+                    log.info("✅ 已有預約記錄並確認存在！")
+                    notify_already_booked_confirmed()
+                else:
+                    log.warning("⚠️ 顯示已登記，但查詢記錄未找到")
+                    notify_booked_failed("送出時提示已登記，但查詢記錄未找到，請手動確認")
+
+            # 情況 C：未知結果
             else:
                 log.warning("⚠️ 送出後未偵測到完成訊息，可能表單未成功送出")
                 notify_booked_failed("送出後未偵測到明確完成訊息，請手動確認")
