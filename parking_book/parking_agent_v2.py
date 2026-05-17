@@ -341,11 +341,16 @@ async def check_and_book() -> bool:
             await page.get_by_role("button", name="送出").click()
             submitted = True
             log.info("已點擊送出，等待結果...")
-            await page.wait_for_timeout(_jitter(3000))
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10_000)
-            except AsyncPlaywrightTimeoutError:
-                pass
+
+            # ── 主動等待 dialog 內容出現（避免 Vue 非同步渲染導致讀到空內容）──
+            _expected_patterns = ["您已完成線上預約登記", "已登記預約", "登記預約"]
+            for _kw in _expected_patterns:
+                try:
+                    await page.wait_for_selector(f"text={_kw}", timeout=8_000)
+                    log.info(f"偵測到跳出訊息關鍵字：{_kw}")
+                    break
+                except AsyncPlaywrightTimeoutError:
+                    pass
 
             # ── 先讀取跳出視窗內容，再關閉 ──
             page_text = await page.inner_text("body")
@@ -386,9 +391,15 @@ async def check_and_book() -> bool:
                     log.warning("⚠️ 顯示已登記，但查詢記錄未找到")
                     notify_booked_failed("送出時提示已登記，但查詢記錄未找到，請手動確認")
 
-            # 情況 C：未知結果
+            # 情況 C：未知結果 → 截圖供 debug
             else:
-                log.warning("⚠️ 送出後未偵測到完成訊息，可能表單未成功送出")
+                screenshot_path = f"/tmp/parking_unknown_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                try:
+                    await page.screenshot(path=screenshot_path, full_page=True)
+                    log.warning(f"⚠️ 未知結果截圖已存：{screenshot_path}")
+                except Exception:
+                    pass
+                log.warning(f"⚠️ 送出後未偵測到完成訊息，頁面內容片段：{page_text[:200]!r}")
                 notify_booked_failed("送出後未偵測到明確完成訊息，請手動確認")
 
             return True   # 不論成功失敗都停止輪詢
