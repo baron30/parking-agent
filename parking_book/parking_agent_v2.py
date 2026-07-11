@@ -256,4 +256,4 @@ async def check_and_book_for_date(target_date: str) -> bool:
             await page.wait_for_timeout(_jitter(200))
 
             await page.get_by_role("textbox", name="車牌號碼 (例: AA-1234)").fill(BOOKER_PLATE)
-            await page.wait_for_timeout(_
+            await page.wait_for_timeout(_jitter(800))
