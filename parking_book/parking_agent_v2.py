@@ -307,42 +307,4 @@ async def check_and_book_for_date(target_date: str) -> str:
             await days_field.fill(str(PARKING_DAYS))
             await page.wait_for_timeout(_jitter(200))
 
-            name_field = page.get_by_role("textbox", name="姓名")
-            await name_field.click()
-            await name_field.fill(BOOKER_NAME)
-            await page.wait_for_timeout(_jitter(200))
-
-            plate_field = page.get_by_role("textbox", name="車牌號碼 (例: AA-1234)")
-            await plate_field.fill(BOOKER_PLATE)
-            await page.wait_for_timeout(_jitter(200))
-
-            # 送出
-            await page.get_by_role("button", name="送出").click()
-            submitted = True
-            log.info("已點擊送出，等待結果...")
-
-            _expected_patterns = ["您已完成線上預約登記", "已登記預約", "登記預約"]
-            for _kw in _expected_patterns:
-                try:
-                    await page.wait_for_selector(f"text={_kw}", timeout=8_000)
-                    break
-                except AsyncPlaywrightTimeoutError:
-                    pass
-
-            page_text = await page.inner_text("body")
-
-            try:
-                close_btn = page.get_by_role("button").nth(2)
-                if await close_btn.count() > 0 and await close_btn.is_visible(timeout=3000):
-                    await close_btn.click()
-                    await page.wait_for_timeout(_jitter(1000))
-            except Exception:
-                pass
-
-            # ── 判斷結果 ──
-            if "您已完成線上預約登記" in page_text:
-                verified = await verify_booking(page, target_date)
-                if verified:
-                    notify_booked_success(target_date)
-                    return "SUCCESS"
-                else
+            name_field = page.get_by_role("textbox
