@@ -1,17 +1,15 @@
 """
-停車場預約 Agent v2
+停車場預約 Agent v2 (多日期順序監控版)
 偵測 https://pcc.youparking.com.tw/parkingreserve/#/
-當 TARGET_DATE 出現可預約按鈕時：
+當 TARGET_DATES 依序出現可預約按鈕時：
   1. 發送「可以預約」通知
   2. 自動填入資料並送出
   3. 發送「預約成功/失敗」通知
 
-安裝：
-    pip install playwright requests
-    playwright install chromium
-
-執行：
-    python parking_agent_v2.py
+修改特點：
+  - 7/23 已滿 → 自動繼續檢查 7/24
+  - 7/24 已滿 → 自動檢查下一天
+  - 任一天有「預約」按鈕 → 立即預約該天
 """
 
 import asyncio
@@ -31,7 +29,8 @@ from playwright.async_api import async_playwright, TimeoutError as AsyncPlaywrig
 # 設定區
 # ─────────────────────────────────────────────
 
-TARGET_DATE   = "05-23"   # 頁面日期格式 "2026-05-23 (六)"，模糊比對
+# 改為陣列，按順序監控。頁面日期格式 "2026-07-23 (四)"，模糊比對
+TARGET_DATES  = ["07-23", "07-24"]   
 PARKING_DAYS  = int(os.environ.get("PARKING_DAYS", "5"))   # 停放天數
 
 # GitHub Actions 模式：每次 workflow 執行幾輪（每輪間隔 ~60 秒）
@@ -142,7 +141,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# 通知
+# 通知 (已加入 target_date 參數)
 # ─────────────────────────────────────────────
 
 def notify_line(message: str) -> bool:
@@ -186,63 +185,62 @@ def notify_gmail(subject: str, body: str) -> bool:
         return False
 
 
-def notify_available():
+def notify_available(target_date: str):
     """通知 1：偵測到可預約，自動預約進行中"""
     msg = (
-        f"【{TARGET_DATE} 停車位可以預約！】\n"
+        f"【{target_date} 停車位可以預約！】\n"
         f"偵測時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"正在自動填單送出，請稍候..."
     )
     notify_line(f"🚗 停車預約通知\n\n{msg}")
-    notify_gmail(subject="🚗 停車場可以預約了！正在自動預約...", body=msg)
+    notify_gmail(subject=f"🚗 停車場 {target_date} 可以預約了！正在自動預約...", body=msg)
 
 
-def notify_booked_success():
+def notify_booked_success(target_date: str):
     """通知 2：預約成功"""
     msg = (
-        f"【{TARGET_DATE} 預約成功！】\n"
+        f"【{target_date} 預約成功！】\n"
         f"停放天數：{PARKING_DAYS} 天\n"
         f"完成時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
     notify_line(f"✅ 停車預約成功！\n\n{msg}")
-    notify_gmail(subject="✅ 停車預約成功！", body=msg)
+    notify_gmail(subject=f"✅ 停車場 {target_date} 預約成功！", body=msg)
 
 
-def notify_booked_failed(reason: str):
+def notify_booked_failed(target_date: str, reason: str):
     """通知 2（失敗）：自動預約失敗，請手動操作"""
     msg = (
-        f"【{TARGET_DATE} 自動預約失敗】\n"
+        f"【{target_date} 自動預約失敗】\n"
         f"原因：{reason}\n"
         f"請立即手動前往：https://pcc.youparking.com.tw/parkingreserve/#/"
     )
     notify_line(f"⚠️ 自動預約失敗，請手動操作！\n\n{msg}")
-    notify_gmail(subject="⚠️ 停車自動預約失敗，請手動操作！", body=msg)
+    notify_gmail(subject=f"⚠️ 停車場 {target_date} 自動預約失敗，請手動操作！", body=msg)
 
 
-def notify_already_booked_confirmed():
+def notify_already_booked_confirmed(target_date: str):
     """通知：偵測到「已登記預約」提示，查詢記錄確認存在"""
     msg = (
-        f"【{TARGET_DATE} 已有預約記錄！】\n"
+        f"【{target_date} 已有預約記錄！】\n"
         f"送出時提示已登記，查詢記錄確認存在。\n"
         f"確認時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
     notify_line(f"✅ 停車預約已確認存在！\n\n{msg}")
-    notify_gmail(subject="✅ 停車預約已確認存在！", body=msg)
+    notify_gmail(subject=f"✅ 停車場 {target_date} 預約已確認存在！", body=msg)
 
 # ─────────────────────────────────────────────
 # 預約記錄驗證
 # ─────────────────────────────────────────────
 
-async def verify_booking(page) -> bool:
+async def verify_booking(page, target_date: str) -> bool:
     """
     預約完成後，前往查詢記錄確認是否真的成功。
     回傳 True = 找到記錄；False = 找不到或導航失敗。
-    用 goto 重進首頁，避免 click 導航在 dialog 後頁面狀態不穩定。
     """
     try:
-        log.info("開始驗證預約記錄...")
+        log.info(f"開始驗證 {target_date} 預約記錄...")
 
-        # 直接重進首頁（比 click link 更可靠）
+        # 直接重進首頁
         await page.goto(
             "https://pcc.youparking.com.tw/parkingreserve/#/",
             wait_until="networkidle",
@@ -250,7 +248,7 @@ async def verify_booking(page) -> bool:
         )
         await page.wait_for_timeout(_jitter(800))
 
-        # 進入選單頁（點第一個「前往」）
+        # 進入選單頁
         await page.get_by_role("link", name="前往").first.click()
         await page.wait_for_timeout(_jitter(600))
 
@@ -273,9 +271,9 @@ async def verify_booking(page) -> bool:
         await page.get_by_role("button", name="查 詢").click()
         await page.wait_for_timeout(_jitter(1500))
 
-        # 確認結果含目標日期（格式轉換：05-23 → 05/23）
+        # 確認結果含目標日期（格式轉換：07-23 → 07/23）
         page_text = await page.inner_text("body")
-        date_fragment = TARGET_DATE.replace("-", "/")
+        date_fragment = target_date.replace("-", "/")
         if date_fragment in page_text:
             log.info(f"✅ 預約記錄確認：找到 {date_fragment}")
             return True
@@ -292,17 +290,17 @@ async def verify_booking(page) -> bool:
 
 async def check_and_book() -> bool:
     """
-    回傳 True 表示已處理完畢（不論成功或失敗），停止後續輪次。
-    回傳 False 表示尚未開放或導航失敗，繼續下一輪。
+    回傳 True 表示某一天已成功處理完畢（不論預約成功或失敗），停止後續輪次。
+    回傳 False 表示所有指定的日期皆尚未開放、已滿或導航失敗，需等待下一輪。
     """
     ua       = _random_user_agent()
     viewport = _random_viewport()
-    log.info(f"開始檢查 {TARGET_DATE} | UA: ...{ua[-40:]} | {viewport['width']}x{viewport['height']}")
+    log.info(f"開始檢查目標日期群 {TARGET_DATES} | UA: ...{ua[-40:]} | {viewport['width']}x{viewport['height']}")
 
     # 旗標：是否已按下「送出」
-    # True  → 之後逾時狀態不明，需通知
-    # False → 送出前發生逾時（如重新導向），僅 log，不通知，下一輪重試
     submitted = False
+    # 紀錄當前正在操作哪一天
+    current_operating_date = None
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -317,7 +315,7 @@ async def check_and_book() -> bool:
         )
         page = await context.new_page()
         try:
-            # ── 進入預約列表（導航失敗直接關閉瀏覽器重試，不通知）──
+            # ── 進入預約列表 ──
             try:
                 await page.goto(
                     "https://pcc.youparking.com.tw/parkingreserve/#/",
@@ -341,26 +339,43 @@ async def check_and_book() -> bool:
             except AsyncPlaywrightTimeoutError:
                 pass
 
-            # ── 找目標日期列 ──
-            target_row = page.locator(f"tr:has(td:has-text('{TARGET_DATE}'))").first
-            if await target_row.count() == 0:
-                log.warning(f"找不到 {TARGET_DATE} 的列，頁面可能尚未開放")
+            # ── 依序檢查目標日期陣列 ──
+            selected_date = None
+            target_row = None
+
+            for date in TARGET_DATES:
+                row_locator = page.locator(f"tr:has(td:has-text('{date}'))").first
+                if await row_locator.count() == 0:
+                    log.warning(f"找不到 {date} 的列，可能該天尚未開放，繼續檢查下一天...")
+                    continue
+
+                is_full     = await row_locator.locator(":has-text('已滿')").count() > 0
+                is_bookable = await row_locator.locator("button, a").filter(has_text="預約").count() > 0
+
+                if is_full:
+                    log.info(f"❌ {date} 已滿，自動繼續檢查下一天...")
+                    continue
+
+                if not is_bookable:
+                    log.warning(f"⚠️ {date} 狀態未知，繼續檢查下一天...")
+                    continue
+
+                # 走到這裡，代表這天有「預約」按鈕！
+                selected_date = date
+                target_row = row_locator
+                break
+
+            # 如果所有日期都沒選中（全部已滿或尚未開放）
+            if not selected_date:
+                log.info("本輪檢查結束：所有目標日期皆已滿、狀態未知或尚未開放。")
                 return False
 
-            is_full     = await target_row.locator(":has-text('已滿')").count() > 0
-            is_bookable = await target_row.locator("button, a").filter(has_text="預約").count() > 0
-
-            if is_full:
-                log.info(f"❌ {TARGET_DATE} 已滿")
-                return False
-
-            if not is_bookable:
-                log.warning(f"⚠️ {TARGET_DATE} 狀態未知")
-                return False
+            # 更新當前處理日期，供 Exception 捕捉時發通知使用
+            current_operating_date = selected_date
             
             # ── 可預約：發送通知 1 ──
-            log.info(f"✅ {TARGET_DATE} 可以預約！開始自動填單...")
-            notify_available()
+            log.info(f"✅ {selected_date} 可以預約！開始自動填單...")
+            notify_available(selected_date)
 
             # ── 點擊「預約」按鈕 ──
             book_btn = target_row.locator("button, a").filter(has_text="預約").first
@@ -384,12 +399,12 @@ async def check_and_book() -> bool:
             await plate_field.fill(BOOKER_PLATE)
             await page.wait_for_timeout(_jitter(200))
 
-            # ── 點擊「送出」（送出後設旗標，之後的逾時才需通知）──
+            # ── 點擊「送出」（送出後設旗標）──
             await page.get_by_role("button", name="送出").click()
             submitted = True
-            log.info("已點擊送出，等待結果...")
+            log.info(f"已點擊送出 ({selected_date})，等待結果...")
 
-            # ── 主動等待 dialog 內容出現（避免 Vue 非同步渲染導致讀到空內容）──
+            # ── 主動等待 dialog 內容出現 ──
             _expected_patterns = ["您已完成線上預約登記", "已登記預約", "登記預約"]
             for _kw in _expected_patterns:
                 try:
@@ -409,19 +424,19 @@ async def check_and_book() -> bool:
                     await page.wait_for_timeout(_jitter(1000))
                     log.info("已關閉跳出視窗")
             except Exception:
-                pass  # 視窗不存在或已自動關閉，略過
+                pass
 
-            # ── 判斷結果：三種情況 ──
+            # ── 判斷結果 ──
             # 情況 A：當次預約完成
             if "您已完成線上預約登記" in page_text:
                 log.info("表單顯示完成，開始查詢記錄雙重確認...")
-                verified = await verify_booking(page)
+                verified = await verify_booking(page, selected_date)
                 if verified:
-                    log.info("🎉 預約成功並已確認記錄！")
-                    notify_booked_success()
+                    log.info(f"🎉 {selected_date} 預約成功並已確認記錄！")
+                    notify_booked_success(selected_date)
                 else:
-                    log.warning("⚠️ 表單顯示完成，但查詢記錄未找到")
-                    notify_booked_failed("預約頁面顯示完成，但查詢記錄未找到，請手動確認")
+                    log.warning(f"⚠️ 表單顯示完成，但查詢記錄未找到 {selected_date}")
+                    notify_booked_failed(selected_date, "預約頁面顯示完成，但查詢記錄未找到，請手動確認")
 
             # 情況 B：車牌已有舊的登記預約（非當次）
             elif re.search(
@@ -429,14 +444,14 @@ async def check_and_book() -> bool:
                 page_text,
                 re.DOTALL,
             ):
-                log.info("偵測到已有登記預約提示，開始查詢記錄確認...")
-                verified = await verify_booking(page)
+                log.info(f"偵測到已有登記預約提示，開始查詢記錄確認 {selected_date}...")
+                verified = await verify_booking(page, selected_date)
                 if verified:
-                    log.info("✅ 已有預約記錄並確認存在！")
-                    notify_already_booked_confirmed()
+                    log.info(f"✅ {selected_date} 已有預約記錄並確認存在！")
+                    notify_already_booked_confirmed(selected_date)
                 else:
-                    log.warning("⚠️ 顯示已登記，但查詢記錄未找到")
-                    notify_booked_failed("送出時提示已登記，但查詢記錄未找到，請手動確認")
+                    log.warning(f"⚠️ 顯示已登記，但查詢記錄未找到 {selected_date}")
+                    notify_booked_failed(selected_date, "送出時提示已登記，但查詢記錄未找到，請手動確認")
 
             # 情況 C：未知結果 → 截圖供 debug，繼續下一輪重試（不通知、不停止）
             else:
@@ -447,15 +462,15 @@ async def check_and_book() -> bool:
                 except Exception:
                     pass
                 log.warning(f"⚠️ 送出後未偵測到完成訊息，本輪跳過繼續重試，頁面片段：{page_text[:200]!r}")
-                return False   # 繼續下一輪重試，不停止
+                return False
 
             return True   # 情況 A / B 已處理完畢，停止輪詢
 
         except AsyncPlaywrightTimeoutError as e:
-            if submitted:
+            if submitted and current_operating_date:
                 # 送出後逾時：狀態不明，需通知
                 log.error(f"送出後頁面逾時，狀態不明：{e}")
-                notify_booked_failed("送出後頁面逾時，請手動確認是否預約成功")
+                notify_booked_failed(current_operating_date, "送出後頁面逾時，請手動確認是否預約成功")
                 return True
             else:
                 # 送出前逾時（如重新導向）：僅 log，不通知，下一輪重試
@@ -473,7 +488,7 @@ async def check_and_book() -> bool:
 # ─────────────────────────────────────────────
 
 async def main():
-    log.info(f"停車場預約 Agent | 目標：{TARGET_DATE} | 停放天數：{PARKING_DAYS} | 輪數：{ROUNDS}")
+    log.info(f"停車場預約 Agent | 目標日期群：{TARGET_DATES} | 停放天數：{PARKING_DAYS} | 輪數：{ROUNDS}")
 
     for round_num in range(1, ROUNDS + 1):
         if ROUNDS > 1:
