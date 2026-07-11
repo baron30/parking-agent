@@ -1,3 +1,4 @@
+# sync trigger 2026-07-11
 name: Parking Availability Check
 on:
   repository_dispatch:
