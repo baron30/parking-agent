@@ -1,14 +1,22 @@
 """
-停車場預約 Agent v3 (Discord 版 / 直接進入 reservedindex/1 / 全面重構版)
+停車場預約 Agent v3 (Discord 版 / 全面重構版)
 
-主要變更 (相較 v2)：
-  - 不再從首頁出發，直接進入 https://pcc.youparking.com.tw/parkingreserve/#/reservedindex/1
+導覽流程：
+  首頁 (/#/)
+    → 點「前往」
+  進入 /#/reservedindex/1
+    → 勾選「我已閱讀並同意」
+    → 點「前往登記」
+  進入 /#/reservedlist/1
+    → 開始搜尋 TARGET_DATES → 點預約 → 填單 → 送出 → verify_booking() → Discord 通知
+
+主要特色：
   - Browser / Context / Page 僅建立一次，全程重複使用，只做 reload，不再每輪重開瀏覽器
   - 全面改用 get_by_text() / locator(filter) / xpath ancestor 尋找元素，不依賴 <tr>/<td> 結構
   - 新增 safe_click()：scroll_into_view → hover → click（重試3次）→ force click →
     dispatch_event("click") → JS evaluate click，逐層降級直到成功或全部失敗
   - Checkbox 尋找順序：input[type=checkbox] → label 文字 → CSS fallback
-  - 「前往預約」按鈕具備多重 fallback（role button / role link / text / css）
+  - 「前往」「前往登記」按鈕皆具備多重 fallback（role button / role link / text / css）
   - 日期比對同時支援 07-23 / 07/23 / 2026-07-23 / 2026/07/23 等格式
   - 預約按鈕文字支援「立即預約」「我要預約」「預約」等變體
   - 遇到 Cloudflare「Checking your browser / Just a moment」會等待通過，不會直接失敗
@@ -45,9 +53,10 @@ DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 BOOKER_NAME         = os.environ["BOOKER_NAME"]
 BOOKER_PLATE        = os.environ["BOOKER_PLATE"]
 
-# 直接進入的預約入口 (v3 新流程)
-RESERVE_ENTRY_URL = "https://pcc.youparking.com.tw/parkingreserve/#/reservedindex/1"
+# 頁面導覽路徑 (v3 新流程：首頁 →「前往」→ reservedindex/1 →「前往登記」→ reservedlist/1)
 HOME_URL          = "https://pcc.youparking.com.tw/parkingreserve/#/"
+RESERVE_ENTRY_URL = "https://pcc.youparking.com.tw/parkingreserve/#/reservedindex/1"
+RESERVE_LIST_URL  = "https://pcc.youparking.com.tw/parkingreserve/#/reservedlist/1"
 
 # ─────────────────────────────────────────────
 # 反封鎖環境隨機優化
@@ -326,8 +335,33 @@ async def take_error_screenshot(page, target_date: str):
 
 
 # ─────────────────────────────────────────────
-# 頁面導覽：進入 reservedindex/1 → 同意條款 → 前往預約
+# 頁面導覽：首頁 → 「前往」→ reservedindex/1 → 同意條款 → 「前往登記」→ reservedlist/1
 # ─────────────────────────────────────────────
+
+async def click_home_enter(page) -> bool:
+    """在首頁點擊「前往」進入 reservedindex/1"""
+    log.info("🔍 尋找首頁「前往」連結/按鈕...")
+    candidates = [
+        ("role_link", lambda: page.get_by_role("link", name="前往")),
+        ("role_button", lambda: page.get_by_role("button", name="前往")),
+        ("text", lambda: page.get_by_text("前往", exact=True)),
+        ("css_a", lambda: page.locator("a:has-text('前往')")),
+        ("css_button", lambda: page.locator("button:has-text('前往')")),
+    ]
+    for name, make_loc in candidates:
+        try:
+            loc = make_loc().first
+            if await loc.count() > 0:
+                await wait_for_locator(loc, description=f"首頁前往({name})")
+                if await safe_click(loc, f"首頁前往({name})"):
+                    log.info(f"✅ 首頁「前往」點擊成功 ({name})")
+                    return True
+        except Exception as e:
+            log.warning(f"⚠️ 首頁「前往」fallback [{name}] 失敗: {e}")
+            continue
+    log.error("❌ 所有首頁「前往」嘗試均失敗")
+    return False
+
 
 async def check_agreement_checkbox(page) -> bool:
     log.info("🔍 尋找「我已閱讀並同意」勾選框...")
@@ -380,47 +414,63 @@ async def check_agreement_checkbox(page) -> bool:
     return False
 
 
-async def click_proceed_to_booking(page) -> bool:
-    log.info("🔍 尋找「前往預約」按鈕...")
+async def click_proceed_to_registration(page) -> bool:
+    """尋找並點擊「前往登記」按鈕，成功後會進入 reservedlist/1"""
+    log.info("🔍 尋找「前往登記」按鈕...")
     candidates = [
-        ("role_button", lambda: page.get_by_role("button", name="前往預約")),
-        ("role_link", lambda: page.get_by_role("link", name="前往預約")),
-        ("text", lambda: page.get_by_text("前往預約")),
-        ("css_button", lambda: page.locator("button:has-text('前往預約')")),
-        ("css_a", lambda: page.locator("a:has-text('前往預約')")),
+        ("role_button", lambda: page.get_by_role("button", name="前往登記")),
+        ("role_link", lambda: page.get_by_role("link", name="前往登記")),
+        ("text", lambda: page.get_by_text("前往登記")),
+        ("css_button", lambda: page.locator("button:has-text('前往登記')")),
+        ("css_a", lambda: page.locator("a:has-text('前往登記')")),
     ]
     for name, make_loc in candidates:
         try:
             loc = make_loc().first
             if await loc.count() > 0:
-                await wait_for_locator(loc, description=f"前往預約({name})")
-                if await safe_click(loc, f"前往預約({name})"):
-                    log.info(f"✅ 前往預約按鈕點擊成功 ({name})")
+                await wait_for_locator(loc, description=f"前往登記({name})")
+                if await safe_click(loc, f"前往登記({name})"):
+                    log.info(f"✅ 前往登記按鈕點擊成功 ({name})")
                     return True
         except Exception as e:
-            log.warning(f"⚠️ 前往預約 fallback [{name}] 失敗: {e}")
+            log.warning(f"⚠️ 前往登記 fallback [{name}] 失敗: {e}")
             continue
-    log.error("❌ 所有前往預約按鈕嘗試均失敗")
+    log.error("❌ 所有前往登記按鈕嘗試均失敗")
     return False
 
 
 async def navigate_to_reservation_list(page) -> bool:
-    log.info(f"🌐 進入預約頁面 {RESERVE_ENTRY_URL} ...")
+    """
+    完整導覽流程：
+    首頁 → 點「前往」→ reservedindex/1 → 勾選同意 → 點「前往登記」→ reservedlist/1
+    """
+    log.info(f"🌐 進入首頁 {HOME_URL} ...")
     try:
-        await page.goto(RESERVE_ENTRY_URL, wait_until="domcontentloaded", timeout=30_000)
+        await page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30_000)
     except AsyncPlaywrightTimeoutError:
-        log.warning("⚠️ 導航逾時")
+        log.warning("⚠️ 首頁導航逾時")
         return False
 
     await wait_for_cloudflare(page)
     await page.wait_for_timeout(_jitter(1000))
-    log.info("📄 DOM 已載入，開始尋找同意勾選框")
+    log.info("📄 首頁 DOM 已載入，開始尋找「前往」連結")
+
+    if not await click_home_enter(page):
+        return False
+
+    await wait_for_cloudflare(page)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10_000)
+    except AsyncPlaywrightTimeoutError:
+        pass
+    await page.wait_for_timeout(_jitter(800))
+    log.info(f"📄 已進入 {RESERVE_ENTRY_URL}，開始尋找同意勾選框")
 
     if not await check_agreement_checkbox(page):
         return False
     await page.wait_for_timeout(_jitter(400))
 
-    if not await click_proceed_to_booking(page):
+    if not await click_proceed_to_registration(page):
         return False
 
     await wait_for_cloudflare(page)
@@ -429,7 +479,7 @@ async def navigate_to_reservation_list(page) -> bool:
     except AsyncPlaywrightTimeoutError:
         pass
 
-    log.info("✅ 已進入預約清單頁面")
+    log.info(f"✅ 已進入 {RESERVE_LIST_URL} 預約清單頁面")
     return True
 
 
