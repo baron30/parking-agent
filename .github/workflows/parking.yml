@@ -1,77 +1,60 @@
 name: Parking Availability Check
-
 on:
   repository_dispatch:
     types: [trigger]
   schedule:
     # GitHub Actions cron 最短間隔為 5 分鐘
-    # 解法：每次 workflow 內部執行 5 輪，每輪間隔 ~60 秒 → 實質每分鐘偵測一次
+    # 解法：每次 workflow 內部執行 12 輪，每輪間隔 ~18~25 秒 → 實質更高頻率偵測
     - cron: '*/5 * * * *'
   workflow_dispatch:   # 允許手動觸發
-
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 消除 Node.js 20 deprecation 警告
-
 jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 12   # install ~2min + 12輪×(~12s執行 + ~22s等待) = ~8.5min，留緩衝
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-playwright-requests
-
       - name: Install Python dependencies
         run: pip install playwright requests
-
       - name: Get Playwright version
         id: pw-version
         run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> $GITHUB_OUTPUT
-
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
-
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: playwright install chromium --with-deps
-
       - name: Install Playwright system deps only (cache hit)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: playwright install-deps chromium
-
-      - name: Run parking agent (12 rounds × ~25s)
+      - name: Run parking agent (12 rounds × ~18~25s)
         env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          GMAIL_SENDER: ${{ secrets.GMAIL_SENDER }}
-          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-          GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           BOOKER_NAME: ${{ secrets.BOOKER_NAME }}
           BOOKER_PLATE: ${{ secrets.BOOKER_PLATE }}
           PARKING_DAYS: "5"
           CHECK_ROUNDS: "12"
         run: python parking_book/parking_agent_v2.py
-
       - name: Upload debug screenshots (if any)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots-${{ github.run_id }}
-          path: /tmp/parking_unknown_*.png
+          path: screenshot/error_*.png
           if-no-files-found: ignore
           retention-days: 3
