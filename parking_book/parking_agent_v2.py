@@ -1,5 +1,5 @@
 """
-停車場預約 Agent v2 (Discord 精簡版)
+停車場預約 Agent v2 (Discord 精簡多日期版)
 偵測 https://pcc.youparking.com.tw/parkingreserve/#/
 當 TARGET_DATES 中的日期出現可預約按鈕時：
   1. 發送「可以預約」通知 (Discord Webhook)
@@ -22,7 +22,7 @@ from playwright.async_api import async_playwright, TimeoutError as AsyncPlaywrig
 # 設定區
 # ─────────────────────────────────────────────
 
-# 多日期依序預約清單 (頁面日期格式如 "2026-07-23 (四)"，採模糊比對)
+# 多日期依序預約清單 (頁面日期格式 "2026-07-23 (四)"，模糊比對)
 TARGET_DATES  = ["07-23", "07-24"]   
 PARKING_DAYS  = int(os.environ.get("PARKING_DAYS", "5"))   # 停放天數
 
@@ -88,7 +88,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# Discord 通知
+# Discord Webhook 通知
 # ─────────────────────────────────────────────
 
 def send_discord_notification(title: str, description: str, color: int = 3447003):
@@ -196,7 +196,7 @@ async def verify_booking(page, target_date: str) -> bool:
 
 async def check_and_book_for_date(target_date: str) -> bool:
     """檢查單一日期，若成功或已決定結果回傳 True，需重複檢查回傳 False"""
-    ua       = _random_user_agent()
+    ua = _random_user_agent()
     viewport = _random_viewport()
     log.info(f"開始檢查 {target_date} | UA: ...{ua[-40:]} | {viewport['width']}x{viewport['height']}")
 
@@ -239,3 +239,95 @@ async def check_and_book_for_date(target_date: str) -> bool:
                 return False
 
             if not is_bookable:
+                log.warning(f"⚠️ {target_date} 狀態未知")
+                return False
+            
+            log.info(f"✅ {target_date} 可以預約！開始填單...")
+            notify_available(target_date)
+
+            book_btn = target_row.locator("button, a").filter(has_text="預約").first
+            await book_btn.click()
+            await page.wait_for_timeout(_jitter(800))
+
+            await page.get_by_role("textbox", name="停放天數").fill(str(PARKING_DAYS))
+            await page.wait_for_timeout(_jitter(200))
+
+            await page.get_by_role("textbox", name="姓名").fill(BOOKER_NAME)
+            await page.wait_for_timeout(_jitter(200))
+
+            await page.get_by_role("textbox", name="車牌號碼 (例: AA-1234)").fill(BOOKER_PLATE)
+            await page.wait_for_timeout(_jitter(200))
+
+            await page.get_by_role("button", name="送出").click()
+            submitted = True
+            log.info("已送出表單，等待結果彈窗...")
+
+            for _kw in ["您已完成線上預約登記", "已登記預約", "登記預約"]:
+                try:
+                    await page.wait_for_selector(f"text={_kw}", timeout=8_000)
+                    break
+                except AsyncPlaywrightTimeoutError:
+                    pass
+
+            page_text = await page.inner_text("body")
+
+            try:
+                close_btn = page.get_by_role("button").nth(2)
+                if await close_btn.count() > 0 and await close_btn.is_visible(timeout=3000):
+                    await close_btn.click()
+                    await page.wait_for_timeout(_jitter(1000))
+            except Exception:
+                pass
+
+            if "您已完成線上預約登記" in page_text:
+                if await verify_booking(page, target_date):
+                    notify_booked_success(target_date)
+                else:
+                    notify_booked_failed(target_date, "頁面顯示完成，但雙重驗證查詢失敗")
+                return True
+
+            elif re.search(rf"車號\s*\[{re.escape(BOOKER_PLATE)}\].*?已於.*?登記預約", page_text, re.DOTALL):
+                if await verify_booking(page, target_date):
+                    notify_already_booked_confirmed(target_date)
+                else:
+                    notify_booked_failed(target_date, "提示已登記，但雙重驗證查詢失敗")
+                return True
+
+            else:
+                log.warning(f"⚠️ 送出後未偵測到明確結果，將於下輪重試")
+                return False
+
+        except AsyncPlaywrightTimeoutError as e:
+            if submitted:
+                log.error(f"送出後頁面逾時：{e}")
+                notify_booked_failed(target_date, "送出後頁面逾時，狀態不明，請手動確認")
+                return True
+            return False
+        except Exception as e:
+            log.error(f"執行時發生例外：{e}", exc_info=True)
+            return False
+        finally:
+            await browser.close()
+
+# ─────────────────────────────────────────────
+# 主程式
+# ─────────────────────────────────────────────
+
+async def main():
+    log.info(f"停車場預約 Agent (Discord 版) | 目標日期：{TARGET_DATES} | 輪數：{ROUNDS}")
+    completed_dates = set()
+
+    for round_num in range(1, ROUNDS + 1):
+        active_dates = [d for d in TARGET_DATES if d not in completed_dates]
+        if not active_dates:
+            log.info("🎉 所有目標日期皆已處理完畢，提早結束！")
+            return
+
+        if ROUNDS > 1:
+            log.info(f"── 第 {round_num}/{ROUNDS} 輪 ── (待處理: {active_dates})")
+
+        for d in active_dates:
+            if await check_and_book_for_date(d):
+                completed_dates.add(d)
+
+        if len(completed_dates) == len(TARGET_DATES):
